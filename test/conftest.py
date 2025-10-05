@@ -1,6 +1,7 @@
 import pathlib
 import shutil
 import tempfile
+import json
 from textwrap import dedent
 
 import pytest
@@ -11,269 +12,198 @@ from git.util import Actor
 import wily.__main__ as main
 
 
-@pytest.fixture
-def gitdir(tmpdir):
-    """Create a project and add code to it"""
-    repo = Repo.init(path=tmpdir)
-    tmppath = pathlib.Path(tmpdir)
-    testpath = tmppath / "src" / "test.py"
-    (tmppath / "src").mkdir()
-    # Write a test file to the repo
-    with open(testpath, "w") as test_txt:
-        test_txt.write("import abc")
+# ---------------------- Helper Functions ---------------------- #
 
+def git_commit(repo: Repo, file_path: pathlib.Path, message: str, author: Actor, committer: Actor,
+               author_date: str, commit_date: str):
+    """Add file to index and commit to git repo."""
     index = repo.index
-    index.add([str(testpath)])
+    index.add([str(file_path)])
+    index.commit(
+        message,
+        author=author,
+        committer=committer,
+        author_date=author_date,
+        commit_date=commit_date,
+    )
 
+
+def run_cli(*args):
+    """Run Wily CLI and assert success."""
+    runner = CliRunner()
+    result = runner.invoke(main.cli, list(args))
+    assert result.exit_code == 0, result.stdout
+    return result
+
+
+def make_ipynb(cells):
+    """Create a minimal notebook dictionary from a list of cells."""
+    return {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {
+                "name": "python",
+                "version": "3.4.2"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 0
+    }
+
+
+def make_code_cell(source):
+    """Create a code cell dictionary for a notebook."""
+    return {
+        "cell_type": "code",
+        "metadata": {},
+        "source": source,
+        "outputs": [],
+        "execution_count": 0,
+        "input": []
+    }
+
+
+# ---------------------- Fixtures ---------------------- #
+
+@pytest.fixture
+def gitdir(tmpdir) -> str:
+    """Create a temporary Git repo with a Python test file and multiple commits."""
+    tmppath = pathlib.Path(tmpdir)
+    src_path = tmppath / "src"
+    src_path.mkdir()
+    test_file = src_path / "test.py"
+    test_file.write_text("import abc")
+
+    repo = Repo.init(path=tmpdir)
     author = Actor("An author", "author@example.com")
     committer = Actor("A committer", "committer@example.com")
 
-    index.commit(
-        "basic test",
-        author=author,
-        committer=committer,
-        author_date="Thu, 07 Apr 2019 22:13:13 +0200",
-        commit_date="Thu, 07 Apr 2019 22:13:13 +0200",
-    )
+    # Initial commit
+    git_commit(repo, test_file, "basic test", author, committer,
+               "Thu, 07 Apr 2019 22:13:13 +0200", "Thu, 07 Apr 2019 22:13:13 +0200")
 
-    first_test = """
-    import abc
-    foo = 1
-    def function1():
-        a = 1 + 1
+    # Subsequent versions
+    versions = [
+        ("add line", """
+            import abc
+            foo = 1
+            def function1():
+                a = 1 + 1
 
-    class Class1(object):
-        def method(self):
-            b = 1 + 5
-    """
-    with open(testpath, "w") as test_txt:
-        test_txt.write(dedent(first_test))
+            class Class1(object):
+                def method(self):
+                    b = 1 + 5
+        """, "Mon, 10 Apr 2019 22:13:13 +0200"),
+        ("remove line", """
+            import abc
+            foo = 1
+            def function1():
+                a = 1 + 1
+            class Class1(object):
+                def method(self):
+                    b = 1 + 5
+                    if b == 6:
+                        return 'banana'
+        """, "Thu, 14 Apr 2019 22:13:13 +0200")
+    ]
 
-    index.add([str(testpath)])
-    index.commit(
-        "add line",
-        author=author,
-        committer=committer,
-        author_date="Mon, 10 Apr 2019 22:13:13 +0200",
-        commit_date="Mon, 10 Apr 2019 22:13:13 +0200",
-    )
+    for message, content, date in versions:
+        test_file.write_text(dedent(content))
+        git_commit(repo, test_file, message, author, committer, date, date)
 
-    second_test = """
-    import abc
-    foo = 1
-    def function1():
-        a = 1 + 1
-    class Class1(object):
-        def method(self):
-            b = 1 + 5
-            if b == 6:
-                return 'banana'
-    """
-
-    with open(testpath, "w") as test_txt:
-        test_txt.write(dedent(second_test))
-
-    index.add([str(testpath)])
-    index.commit(
-        "remove line",
-        author=author,
-        committer=committer,
-        author_date="Thu, 14 Apr 2019 22:13:13 +0200",
-        commit_date="Thu, 14 Apr 2019 22:13:13 +0200",
-    )
-
-    yield tmpdir
+    yield str(tmpdir)
     repo.close()
 
 
 @pytest.fixture
 def builddir(gitdir):
-    """
-    A directory with a wily cache
-    """
+    """Create a wily cache index for the gitdir project."""
     tmppath = pathlib.Path(gitdir)
-    runner = CliRunner()
-    result1 = runner.invoke(
-        main.cli, ["--debug", "--path", gitdir, "build", str(tmppath / "src")]
-    )
-    assert result1.exit_code == 0, result1.stdout
-
-    result2 = runner.invoke(main.cli, ["--debug", "--path", gitdir, "index"])
-    assert result2.exit_code == 0, result2.stdout
+    run_cli("--debug", "--path", gitdir, "build", str(tmppath / "src"))
+    run_cli("--debug", "--path", gitdir, "index")
 
     yield gitdir
 
-    result1 = runner.invoke(main.cli, ["--debug", "--path", gitdir, "clean", "-y"])
-    assert result1.exit_code == 0, result1.stdout
+    run_cli("--debug", "--path", gitdir, "clean", "-y")
 
 
 @pytest.fixture
-def ipynbgitdir(tmpdir):
-    """
-    A fixture that provides a directory and a working Git DB,
-    contains a single IPython notebook that has 3 revisions.
-    """
-    _NB_FOOTER = """
-     "metadata": {
-          "kernelspec": {
-           "display_name": "Python 3",
-           "language": "python",
-           "name": "python3"
-          },
-          "language_info": {
-           "codemirror_mode": {
-            "name": "ipython",
-            "version": 3
-           },
-           "file_extension": ".py",
-           "mimetype": "text/x-python",
-           "name": "python",
-           "nbconvert_exporter": "python",
-           "pygments_lexer": "ipython3",
-           "version": "3.4.2"
-          }
-         },
-     "nbformat": 4,
-     "nbformat_minor": 0
-    """
-    repo = Repo.init(path=tmpdir)
+def ipynbgitdir(tmpdir) -> str:
+    """Create a temporary Git repo with a Jupyter notebook and multiple commits."""
     tmppath = pathlib.Path(tmpdir)
-    testpath = tmppath / "src" / "test.ipynb"
-    (tmppath / "src").mkdir()
-    # Write a test file to the repo
-    with open(testpath, "w") as test_txt:
-        test_txt.write('{"cells": [],' + _NB_FOOTER + "}")
+    src_path = tmppath / "src"
+    src_path.mkdir()
+    notebook_file = src_path / "test.ipynb"
 
-    index = repo.index
-    index.add([str(testpath)])
-
+    repo = Repo.init(path=tmpdir)
     author = Actor("An author", "author@example.com")
     committer = Actor("A committer", "committer@example.com")
 
-    index.commit("empty notebook", author=author, committer=committer)
+    # Initial empty notebook
+    empty_nb = make_ipynb([])
+    notebook_file.write_text(json.dumps(empty_nb))
+    git_commit(repo, notebook_file, "empty notebook", author, committer,
+               "Thu, 07 Apr 2019 22:13:13 +0200", "Thu, 07 Apr 2019 22:13:13 +0200")
 
-    first_test = (
-        """{
-     "cells": [
-      {
-       "cell_type": "code",
-       "metadata": {},
-       "language": "python",
-       "source": [
-        "import abc\\n",
-        "foo = 1\\n",
-        "def function1():\\n",
-        "    a = 1 + 1\\n",
-        "\\n",
-        "class Class1(object):\\n",
-        "    def method(self):\\n",
-        "        b = 1 + 5\\n"
-       ],
-       "outputs": [],
-       "execution_count": 0,
-       "input": []
-      }
-      ],
-    """
-        + _NB_FOOTER
-        + "}"
-    )
-    with open(testpath, "w") as test_txt:
-        test_txt.write(dedent(first_test))
+    # Notebook version 1
+    nb_v1 = make_ipynb([
+        make_code_cell([
+            "import abc\n",
+            "foo = 1\n",
+            "def function1():\n    a = 1 + 1\n",
+            "class Class1(object):\n    def method(self):\n        b = 1 + 5\n"
+        ])
+    ])
+    notebook_file.write_text(json.dumps(nb_v1))
+    git_commit(repo, notebook_file, "single cell", author, committer,
+               "Mon, 10 Apr 2019 22:13:13 +0200", "Mon, 10 Apr 2019 22:13:13 +0200")
 
-    index.add([str(testpath)])
-    index.commit("single cell", author=author, committer=committer)
+    # Notebook version 2
+    nb_v2 = make_ipynb([
+        make_code_cell([
+            "import abc\nfoo = 1\ndef function1():\n    a = 1 + 1\nclass Class1(object):\n"
+            "    def method(self):\n        b = 1 + 5\n        if b == 6:\n            return 'banana'\n"
+        ]),
+        make_code_cell([
+            "foo = 1\nclass Class1(object):\n    def method(self):\n        b = 1 + 5\n"
+            "        if b == 6:\n            return 'banana'\n"
+        ])
+    ])
+    notebook_file.write_text(json.dumps(nb_v2))
+    git_commit(repo, notebook_file, "second cell", author, committer,
+               "Thu, 14 Apr 2019 22:13:13 +0200", "Thu, 14 Apr 2019 22:13:13 +0200")
 
-    second_test = (
-        """{
-     "cells": [
-      {
-       "cell_type": "code",
-       "metadata": {},
-       "language": "python",
-       "source": [
-        "import abc\\n",
-        "foo = 1\\n",
-        "def function1():\\n",
-        "    a = 1 + 1\\n",
-        "class Class1(object):\\n",
-        "    def method(self):\\n",
-        "        b = 1 + 5\\n",
-        "        if b == 6:\\n",
-        "            return 'banana'\\n"
-       ],
-       "outputs": [],
-       "execution_count": 0,
-       "input": []
-      },
-      {
-       "cell_type": "code",
-       "metadata": {},
-       "language": "python",
-       "source": [
-        "foo = 1\\n",
-        "class Class1(object):\\n",
-        "    def method(self):\\n",
-        "        b = 1 + 5\\n",
-        "        if b == 6:\\n",
-        "            return 'banana'\\n"
-       ],
-       "outputs": [],
-       "execution_count": 0,
-       "input": []
-      }
-      ],
-    """
-        + _NB_FOOTER
-        + "}"
-    )
-
-    with open(testpath, "w") as test_txt:
-        test_txt.write(dedent(second_test))
-
-    index.add([str(testpath)])
-    index.commit("second cell", author=author, committer=committer)
-
-    yield tmpdir
+    yield str(tmpdir)
     repo.close()
 
 
 @pytest.fixture
 def ipynbbuilddir(ipynbgitdir):
-    """
-    The ipynbgitdir fixture converted into a wily cache index.
-    """
+    """Convert an ipynbgitdir repo into a wily cache index."""
     tmppath = pathlib.Path(ipynbgitdir)
-
     config = """
     [wily]
     include_ipynb = true
     ipynb_cells = true
     """
-    config_path = tmppath / "wily.cfg"
-    with open(config_path, "w") as config_f:
-        config_f.write(config)
+    (tmppath / "wily.cfg").write_text(config)
 
-    runner = CliRunner()
-    result1 = runner.invoke(
-        main.cli, ["--debug", "--path", ipynbgitdir, "build", str(tmppath / "src")]
-    )
-    assert result1.exit_code == 0, result1.stdout
-
-    result2 = runner.invoke(main.cli, ["--debug", "--path", ipynbgitdir, "index"])
-    assert result2.exit_code == 0, result2.stdout
+    run_cli("--debug", "--path", ipynbgitdir, "build", str(tmppath / "src"))
+    run_cli("--debug", "--path", ipynbgitdir, "index")
 
     yield ipynbgitdir
 
-    result1 = runner.invoke(main.cli, ["--debug", "--path", ipynbgitdir, "clean", "-y"])
-    assert result1.exit_code == 0, result1.stdout
+    run_cli("--debug", "--path", ipynbgitdir, "clean", "-y")
 
 
 @pytest.fixture(autouse=True)
 def cache_path(monkeypatch):
-    """
-    Configure wily cache and home path, clean up cache afterward
-    """
+    """Configure wily cache and home path, clean up after test."""
     tmp = tempfile.mkdtemp()
     monkeypatch.setenv("HOME", tmp)
     yield tmp
